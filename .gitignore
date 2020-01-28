@@ -1,0 +1,6 @@
+.idea/
+__pycache__/
+
+*.ipynb
+
+test_stargan_vc2_model.py
