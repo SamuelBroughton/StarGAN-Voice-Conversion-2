@@ -82,7 +82,7 @@ class Solver(object):
 
         print_network(self.generator, 'Generator')
         print_network(self.discriminator, 'Discriminator')
-            
+
         self.generator.to(self.device)
         self.discriminator.to(self.device)
 
@@ -131,8 +131,8 @@ class Solver(object):
                                    only_inputs=True)[0]
 
         dydx = dydx.view(dydx.size(0), -1)
-        dydx_l2norm = torch.sqrt(torch.sum(dydx**2, dim=1))
-        return torch.mean((dydx_l2norm-1)**2)
+        dydx_l2norm = torch.sqrt(torch.sum(dydx ** 2, dim=1))
+        return torch.mean((dydx_l2norm - 1) ** 2)
 
     def label2onehot(self, labels, dim):
         """Convert label indices to one-hot vectors."""
@@ -154,12 +154,18 @@ class Solver(object):
         wav, _ = librosa.load(wavfile, sr=sr, mono=True)
         return wav_padding(wav, sr=16000, frame_period=5, multiple=4)
 
+    def save_optim_checkpoints(self, g_name, d_name, type_saving):
+        G_path = os.path.join(self.model_save_dir, g_name)
+        D_path = os.path.join(self.model_save_dir, d_name)
+        torch.save(self.generator.state_dict(), G_path)
+        torch.save(self.discriminator.state_dict(), D_path)
+        print('Saved {} optimal model checkpoints into {}...'.format(type_saving, self.model_save_dir))
+
     def train(self):
         """Train StarGAN."""
 
         # Set data loader.
         train_loader = self.train_loader
-
         data_iter = iter(train_loader)
 
         # Read a batch of testdata
@@ -177,9 +183,17 @@ class Solver(object):
         # Start training from scratch or resume training.
         start_iters = 0
         if self.resume_iters:
-            print("resuming step %d ..."% self.resume_iters)
+            print("resuming step %d ..." % self.resume_iters)
             start_iters = self.resume_iters
             self.restore_model(self.resume_iters)
+
+        # Keep a track of loss for checkpoint saving
+        g_adv_optim = 0            # init optimum g_adv
+        g_adv_converge_low = True  # check which direction g_adv is converging (init as low)
+        g_rec_optim = 0            # init optimum g_rec
+        g_rec_converge_low = True  # check which direction g_rec is converging (init as low)
+        g_tot_optim = 0            # converges around 37
+        g_tot_converge_low = True  # check which direction g_tot is converging (init as low)
 
         # Start training.
         print('Start training...')
@@ -200,59 +214,57 @@ class Solver(object):
             mc_real.unsqueeze_(1)  # (B, D, T) -> (B, 1, D, T) for conv2d
 
             # Generate target domain labels randomly.
-            # spk_label_trg: int,   spk_c_trg:one-hot representation 
-            spk_label_trg, spk_c_trg = self.sample_spk_c(mc_real.size(0)) 
+            # spk_label_trg: int,   spk_c_trg:one-hot representation
+            spk_label_trg, spk_c_trg = self.sample_spk_c(mc_real.size(0))
 
-            mc_real = mc_real.to(self.device)                         # Input mc.
-            spk_label_org = spk_label_org.to(self.device)             # Original spk labels.
-            spk_c_org = spk_c_org.to(self.device)                     # Original spk acc conditioning.
-            spk_label_trg = spk_label_trg.to(self.device)             # Target spk labels for classification loss for G.
-            spk_c_trg = spk_c_trg.to(self.device)                     # Target spk conditioning.
+            mc_real = mc_real.to(self.device)  # Input mc.
+            spk_label_org = spk_label_org.to(self.device)  # Original spk labels.
+            spk_c_org = spk_c_org.to(self.device)  # Original spk acc conditioning.
+            spk_label_trg = spk_label_trg.to(self.device)  # Target spk labels for classification loss for G.
+            spk_c_trg = spk_c_trg.to(self.device)  # Target spk conditioning.
 
             # =================================================================================== #
             #                             2. Train the discriminator                              #
             # =================================================================================== #
 
             # Compute loss with real mc feats.
-            out_src, out_cls_spks = self.discriminator(mc_real, spk_c_org, spk_c_trg)
-            d_loss_real = - torch.mean(out_src)
-            d_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_org)
-            
+            d_out_src = self.discriminator(mc_real, spk_c_org, spk_c_trg)
+            d_loss_real = - torch.mean(torch.log(d_out_src))
 
             # Compute loss with fake mc feats.
             mc_fake = self.generator(mc_real, spk_c_trg)
-            out_src, out_cls_spks = self.discriminator(mc_fake.detach(), spk_c_org, spk_c_trg)
-            d_loss_fake = torch.mean(out_src)
+            d_out_fake = self.discriminator(mc_fake.detach(), spk_c_org, spk_c_trg)
+            d_loss_fake = - torch.mean(torch.log(d_out_fake))
 
+            d_loss = d_loss_real + d_loss_fake
+
+            # TODO: look to include Wassertein GP later - original paper does not include this
             # Compute loss for gradient penalty.
             alpha = torch.rand(mc_real.size(0), 1, 1, 1).to(self.device)
             x_hat = (alpha * mc_real.data + (1 - alpha) * mc_fake.data).requires_grad_(True)
-            out_src, _ = self.discriminator(x_hat, spk_c_org, spk_c_trg)
+            out_src = self.discriminator(x_hat, spk_c_org, spk_c_trg)
             d_loss_gp = self.gradient_penalty(out_src, x_hat)
+            # d_loss = d_loss + self.lambda_gp * d_loss_gp
 
             # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.lambda_cls * d_loss_cls_spks + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
             self.d_optimizer.step()
 
             # Logging.
             loss = {}
-            loss['D/loss_real'] = d_loss_real.item()
-            loss['D/loss_fake'] = d_loss_fake.item()
-            loss['D/loss_cls_spks'] = d_loss_cls_spks.item()
             loss['D/loss_gp'] = d_loss_gp.item()
-            
+            loss['D/loss'] = d_loss.item()
+
             # =================================================================================== #
             #                               3. Train the generator                                #
             # =================================================================================== #
-            
-            if (i+1) % self.n_critic == 0:
+
+            if (i + 1) % self.n_critic == 0:
                 # Original-to-target domain.
                 mc_fake = self.generator(mc_real, spk_c_trg)
-                out_src, out_cls_spks = self.discriminator(mc_fake, spk_c_org, spk_c_trg)
-                g_loss_fake = - torch.mean(out_src)
-                g_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_trg)
+                out_fake = self.discriminator(mc_fake, spk_c_org, spk_c_trg)
+                g_loss_fake = - torch.mean(torch.log(out_fake))
 
                 # Target-to-original domain.
                 mc_reconst = self.generator(mc_fake, spk_c_org)
@@ -263,87 +275,147 @@ class Solver(object):
                 g_loss_id = torch.mean(torch.abs(mc_real - mc_fake_id))
 
                 # Backward and optimize.
-                if (i+1) < 10**4:  # only calc. id mapping loss on first 10^4 iters.
+                if (i + 1) < 10 ** 4:  # only calc. id mapping loss on first 10^4 iters.
                     g_loss = g_loss_fake \
                              + self.lambda_rec * g_loss_rec \
-                             + self.lambda_cls * g_loss_cls_spks \
                              + self.lambda_id * g_loss_id
                 else:
-                    g_loss = g_loss_fake \
-                             + self.lambda_rec * g_loss_rec \
-                             + self.lambda_cls * g_loss_cls_spks
+                    g_loss = g_loss_fake + self.lambda_rec * g_loss_rec
+
+                # Check convergence direction of losses
+                if (i + 1) == 20 * (10 ** 3):  # update optims at 20000 iters
+                    g_adv_optim = g_loss_fake
+                    g_rec_optim = g_loss_rec
+                    g_tot_optim = g_loss
+                if (i + 1) == 70 * (10 ** 3):  # check which direction optims have gone over 50000 iters
+                    if g_loss_fake > g_adv_optim:
+                        g_adv_converge_low = False
+                    if g_loss_rec > g_rec_optim:
+                        g_rec_converge_low = False
+                    if g_loss > g_tot_optim:
+                        g_tot_converge_low = False
+                    print('CONVERGE DIRECTION')
+                    print(f'adv_loss low: {g_adv_converge_low}')
+                    print(f'g_rec_loss los: {g_rec_converge_low}')
+                    print(f'g_loss loq: {g_tot_converge_low}')
+
+                # Update loss for checkpoint saving
+                if (i + 1) > 75 * (10 ** 3):  # only start saving at high enough epochs
+                    # adv and reconstruction together
+                    if g_tot_converge_low:
+                        if (g_loss_fake < g_adv_optim and abs(g_loss_fake - g_adv_optim) > 0.1) and g_loss_rec < g_rec_optim:
+                            self.save_optim_checkpoints('g_adv_rec_optim-G.ckpt', 'g_adv_rec_optim-D.ckpt', 'adv+rec')
+                    elif not g_tot_converge_low:
+                        if (g_loss_fake > g_adv_optim and abs(g_loss_fake - g_adv_optim) > 0.1) and g_loss_rec < g_rec_optim:
+                            self.save_optim_checkpoints('g_adv_rec_optim-G.ckpt', 'g_adv_rec_optim-D.ckpt', 'adv+rec')
+
+                    # adv optimal model point
+                    if g_adv_converge_low:
+                        if g_loss_fake < g_adv_optim:
+                            g_adv_optim = g_loss_fake
+                            self.save_optim_checkpoints('g_adv_optim-G.ckpt', 'g_adv_optim-D.ckpt', 'adv')
+                    elif not g_adv_converge_low:
+                        if g_loss_fake < g_adv_optim:
+                            g_adv_optim = g_loss_fake
+                            self.save_optim_checkpoints('g_adv_optim-G.ckpt', 'g_adv_optim-D.ckpt', 'adv')
+
+                    # reconstruction optimal model point
+                    if g_rec_converge_low:
+                        if g_loss_rec < g_rec_optim:
+                            g_rec_optim = g_loss_rec
+                            self.save_optim_checkpoints('g_rec_optim-G.ckpt', 'g_rec_optim-D.ckpt', 'rec')
+                    elif not g_rec_converge_low:
+                        if g_loss_rec > g_rec_optim:
+                            g_rec_optim = g_loss_rec
+                            self.save_optim_checkpoints('g_rec_optim-G.ckpt', 'g_rec_optim-D.ckpt', 'rec')
+
+                    # total loss optimal model point
+                    if g_tot_converge_low:
+                        if g_loss < g_tot_optim:
+                            g_tot_optim = g_loss
+                            self.save_optim_checkpoints('g_tot_optim-G.ckpt', 'g_tot_optim-D.ckpt', 'tot')
+                    elif not g_tot_converge_low:
+                        if g_loss > g_tot_optim:
+                            g_tot_optim = g_loss
+                            self.save_optim_checkpoints('g_tot_optim-G.ckpt', 'g_tot_optim-D.ckpt', 'tot')
 
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
 
                 # Logging.
-                loss['G/loss_fake'] = g_loss_fake.item()
+                loss['G/g_loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
-                loss['G/loss_cls_spks'] = g_loss_cls_spks.item()
+                loss['G/loss'] = g_loss.item()
 
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
             # =================================================================================== #
 
             # Print out training information.
-            if (i+1) % self.log_step == 0:
+            if (i + 1) % self.log_step == 0:
                 et = time.time() - start_time
                 et = str(datetime.timedelta(seconds=et))[:-7]
-                log = "Elapsed [{}], Iteration [{}/{}]".format(et, i+1, self.num_iters)
+                log = "Elapsed [{}], Iteration [{}/{}]".format(et, i + 1, self.num_iters)
                 for tag, value in loss.items():
                     log += ", {}: {:.4f}".format(tag, value)
                 print(log)
 
                 if self.use_tensorboard:
                     for tag, value in loss.items():
-                        self.logger.scalar_summary(tag, value, i+1)
+                        self.logger.scalar_summary(tag, value, i + 1)
 
-            if (i+1) % self.sample_step == 0:
+            if (i + 1) % self.sample_step == 0:
                 # TODO: change to parameters
-                sampling_rate=16000
-                num_mcep=36
-                frame_period=5
+                sampling_rate = 16000
+                num_mcep = 36
+                frame_period = 5
                 with torch.no_grad():
                     for idx, wav in tqdm(enumerate(test_wavs)):
                         wav_name = basename(test_wavfiles[idx])
                         # print(wav_name)
                         f0, timeaxis, sp, ap = world_decompose(wav=wav, fs=sampling_rate, frame_period=frame_period)
-                        f0_converted = pitch_conversion(f0=f0, 
-                            mean_log_src=self.test_loader.logf0s_mean_src, std_log_src=self.test_loader.logf0s_std_src, 
-                            mean_log_target=self.test_loader.logf0s_mean_trg, std_log_target=self.test_loader.logf0s_std_trg)
+                        f0_converted = pitch_conversion(f0=f0,
+                                                        mean_log_src=self.test_loader.logf0s_mean_src,
+                                                        std_log_src=self.test_loader.logf0s_std_src,
+                                                        mean_log_target=self.test_loader.logf0s_mean_trg,
+                                                        std_log_target=self.test_loader.logf0s_std_trg)
                         coded_sp = world_encode_spectral_envelop(sp=sp, fs=sampling_rate, dim=num_mcep)
-                        
+
                         coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
-                        coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
+                        coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(
+                            self.device)
                         conds = torch.FloatTensor(self.test_loader.spk_c_trg).to(self.device)
                         # print(conds.size())
                         coded_sp_converted_norm = self.generator(coded_sp_norm_tensor, conds).data.cpu().numpy()
-                        coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
+                        coded_sp_converted = np.squeeze(
+                            coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)
-                        wav_transformed = world_speech_synthesis(f0=f0_converted, coded_sp=coded_sp_converted, 
-                                                                ap=ap, fs=sampling_rate, frame_period=frame_period)
-                        
+                        wav_transformed = world_speech_synthesis(f0=f0_converted, coded_sp=coded_sp_converted,
+                                                                 ap=ap, fs=sampling_rate, frame_period=frame_period)
+
                         librosa.output.write_wav(
-                            join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
+                            join(self.sample_dir, str(i + 1) + '-' + wav_name.split('.')[0] + '-vcto-{}'.format(
+                                self.test_loader.trg_spk) + '.wav'), wav_transformed, sampling_rate)
                         if cpsyn_flag:
-                            wav_cpsyn = world_speech_synthesis(f0=f0, coded_sp=coded_sp, 
-                                                        ap=ap, fs=sampling_rate, frame_period=frame_period)
-                            librosa.output.write_wav(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
+                            wav_cpsyn = world_speech_synthesis(f0=f0, coded_sp=coded_sp,
+                                                               ap=ap, fs=sampling_rate, frame_period=frame_period)
+                            librosa.output.write_wav(join(self.sample_dir, 'cpsyn-' + wav_name), wav_cpsyn,
+                                                     sampling_rate)
                     cpsyn_flag = False
 
             # Save model checkpoints.
-            if (i+1) % self.model_save_step == 0:
-                G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i+1))
-                D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(i+1))
+            if (i + 1) % self.model_save_step == 0:
+                G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i + 1))
+                D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(i + 1))
                 torch.save(self.generator.state_dict(), G_path)
                 torch.save(self.discriminator.state_dict(), D_path)
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
             # Decay learning rates.
-            if (i+1) % self.lr_update_step == 0 and (i+1) > (self.num_iters - self.num_iters_decay):
+            if (i + 1) % self.lr_update_step == 0 and (i + 1) > (self.num_iters - self.num_iters_decay):
                 g_lr -= (self.g_lr / float(self.num_iters_decay))
                 d_lr -= (self.d_lr / float(self.num_iters_decay))
                 self.update_lr(g_lr, d_lr)
-                print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
+                print('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))

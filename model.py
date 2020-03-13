@@ -42,7 +42,6 @@ class UpSampleBlock(nn.Module):
     def __init__(self, dim_in, dim_out, kernel_size, stride, padding, bias):
         super(UpSampleBlock, self).__init__()
 
-        # TODO: investigate whether to ConvTranspose2d or Conv2d
         self.conv_layer = nn.Sequential(
             nn.ConvTranspose2d(in_channels=dim_in,
                                out_channels=dim_out,
@@ -85,8 +84,8 @@ class ConditionalInstanceNormalisation(nn.Module):
         self.beta = nn.Linear(style_num, dim_in)
 
     def forward(self, x, c):
-        u = torch.mean(x, axis=2, keepdims=True)
-        var = torch.mean((x - u) * (x - u), axis=2, keepdim=True)
+        u = torch.mean(x, dim=2, keepdim=True)
+        var = torch.mean((x - u) * (x - u), dim=2, keepdim=True)
         std = torch.sqrt(var + 1e-8)
 
         # width = x.shape[2]
@@ -118,11 +117,11 @@ class ResidualBlock(nn.Module):
         self.glu = nn.GLU(dim=1)
 
     def forward(self, x, c_):
-        x = self.conv_layer(x)
-        x = self.cin(x, c_)
-        x = self.glu(x)
+        x_ = self.conv_layer(x)
+        x_ = self.cin(x_, c_)
+        x_ = self.glu(x_)
 
-        return x
+        return x + x_
 
 
 class Generator(nn.Module):
@@ -256,20 +255,13 @@ class Generator(nn.Module):
                                          padding=2,
                                          bias=False)
 
+        # TODO: final layer differs from paper
         self.out = nn.Conv2d(in_channels=64,
                              out_channels=1,
                              kernel_size=(5, 15),
                              stride=(1, 1),
                              padding=(2, 7),
                              bias=False)
-
-        # TODO: final layers differ from paper
-        # self.out = nn.Conv2d(in_channels=35,
-        #                      out_channels=1,
-        #                      kernel_size=(3, 9),
-        #                      stride=(1, 1),
-        #                      padding=(1, 4),
-        #                      bias=False)
 
     def forward(self, x, c_):
         width_size = x.size(3)
@@ -298,9 +290,6 @@ class Generator(nn.Module):
         x = self.up_sample_1(x)
         x = self.up_sample_2(x)
 
-        # TODO: currently outputs w:36 h:256
-        #       Use out[:, :, :-1, :] for w:35
-        #       Would need to change initial data shape
         out = self.out(x)
 
         return out
@@ -316,11 +305,11 @@ class Discriminator(nn.Module):
 
         # Initial layers.
         self.conv_layer_1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(3, 3), stride=(1, 1), padding=1),
             nn.GLU(dim=1)
         )
         self.conv_gated_1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(3, 3), stride=(1, 1), padding=1),
             nn.GLU(dim=1)
         )
 
@@ -349,17 +338,9 @@ class Discriminator(nn.Module):
         self.down_sample_4 = DownsampleBlock(dim_in=512,
                                              dim_out=1024,
                                              kernel_size=(1, 5),
-                                             stride=1,
+                                             stride=(1, 1),
                                              padding=(0, 2),
                                              bias=False)
-
-        # TODO: currently how original Star dealt with class loss
-        self.conv_clf_spks = nn.Conv2d(in_channels=512,
-                                       out_channels=num_speakers,
-                                       kernel_size=(3, 16),
-                                       stride=1,
-                                       padding=0,
-                                       bias=False)  # for num_speaker
 
         # Fully connected layer.
         self.fully_connected = nn.Linear(in_features=512, out_features=1)
@@ -381,70 +362,63 @@ class Discriminator(nn.Module):
 
         x = self.fully_connected(h)
 
-        # TODO: look into GSP layer
-
         p = self.projection(c_onehot)
 
         x += torch.sum(p * h, dim=1, keepdim=True)
 
-        # for class loss
-        out_cls_spks = self.conv_clf_spks(x_)
-
-        return x, out_cls_spks.view(out_cls_spks.size(0), out_cls_spks.size(1))
+        return x
 
 
 # Just for testing shapes of architecture, with existing data.
 if __name__ == '__main__':
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    parser = argparse.ArgumentParser(description='Test G and D architecture')
 
-    parser = argparse.ArgumentParser(description='Test G and D architecture with live data')
-
-    dataset_using_default = ['VCTK', 'VCC2016']
-    train_dir_default = '../VCTK-Data/mc/train'
+    train_dir_default = '../data/VCTK-Data/mc/train'
+    speaker_default = 'p229'
 
     # Data config.
-    parser.add_argument('--dataset_using', type=str, default=dataset_using_default[0], help='VCTK or VCC2016')
     parser.add_argument('--train_dir', type=str, default=train_dir_default, help='Train dir path')
+    parser.add_argument('--speakers', type=str, nargs='+', required=True, help='Speaker dir names')
+    num_speakers = 4
 
     argv = parser.parse_args()
-    dataset_using = argv.dataset_using
     train_dir = argv.train_dir
+    speakers_using = argv.speakers
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Load models
+    generator = Generator(num_speakers=num_speakers).to(device)
+    discriminator = Discriminator(num_speakers=num_speakers).to(device)
 
     # Load data
-    train_loader = get_loader(dataset_using=dataset_using,
-                              data_dir=train_dir,
-                              batch_size=16,
-                              mode='train',
-                              num_workers=1)
+    train_loader = get_loader(speakers_using, train_dir, 8, 'train', num_workers=1)
     data_iter = iter(train_loader)
-    generator = Generator()
-    discriminator = Discriminator()
 
     mc_real, spk_label_org, spk_c_org = next(data_iter)
     mc_real.unsqueeze_(1)  # (B, D, T) -> (B, 1, D, T) for conv2d
 
-    num_speakers = 10
     spk_c = np.random.randint(0, num_speakers, size=mc_real.size(0))
     spk_c_cat = to_categorical(spk_c, num_speakers)
     spk_label_trg = torch.LongTensor(spk_c)
     spk_c_trg = torch.FloatTensor(spk_c_cat)
 
-    mc_real = mc_real.to(device)              # Input mc.
+    mc_real = mc_real.to(device)  # Input mc.
     spk_label_org = spk_label_org.to(device)  # Original spk labels.
-    spk_c_org = spk_c_org.to(device)          # Original spk acc conditioning.
+    spk_c_org = spk_c_org.to(device)  # Original spk acc conditioning.
     spk_label_trg = spk_label_trg.to(device)  # Target spk labels for classification loss for G.
-    spk_c_trg = spk_c_trg.to(device)          # Target spk conditioning.
+    spk_c_trg = spk_c_trg.to(device)  # Target spk conditioning.
 
-    print('Shape of real input: ')
-    print(mc_real.shape)
-    print('Shape of target output: ')
-    print(spk_c_trg.shape)
+    print('Testing Discriminator')
+    print('-------------------------')
+    print(f'Shape in: {mc_real.shape}')
+    dis_real = discriminator(mc_real, spk_c_org, spk_c_trg)
+    print(f'Shape out: {dis_real.shape}')
+    print('------------------------')
 
+    print('Testing Generator')
+    print('-------------------------')
+    print(f'Shape in: {mc_real.shape}')
     mc_fake = generator(mc_real, spk_c_trg)
-    print('Shape of generated output: ')
-    print(mc_fake.size())
-
-    out_src, out_cls_spks = discriminator(mc_fake.detach(), spk_c_org, spk_c_trg)
-    print('Shape of out_src:')
-    print(out_src.shape)
-    print(out_cls_spks.shape)
+    print(f'Shape out: {mc_fake.shape}')
+    print('------------------------')
