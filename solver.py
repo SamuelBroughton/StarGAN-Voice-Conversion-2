@@ -264,7 +264,7 @@ class Solver(object):
                 # Original-to-target domain.
                 mc_fake = self.generator(mc_real, spk_c_trg)
                 out_fake = self.discriminator(mc_fake, spk_c_org, spk_c_trg)
-                g_loss_fake = - torch.mean(torch.log(out_fake))
+                g_loss_fake = torch.mean(torch.log(out_fake))
 
                 # Target-to-original domain.
                 mc_reconst = self.generator(mc_fake, spk_c_org)
