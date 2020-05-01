@@ -1,5 +1,7 @@
 # StarGAN-Voice-Conversion-2
 
+\** **NB: still a working progress with updates coming within 2 weeks. (Dated: 1/05/20)** \**
+
 \** Converted samples coming soon  \**
 
 A pytorch implementation of the paper: StarGAN-VC2: https://arxiv.org/pdf/1907.12279.pdf.
