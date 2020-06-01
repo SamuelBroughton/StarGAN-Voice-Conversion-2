@@ -120,7 +120,26 @@ def get_spk_world_feats(spk_name, spk_paths, output_dir, sample_rate):
     return None
 
 
-def process_spk(spk_path, mc_dir_train, mc_dir_test):
+def process_spk(spk_path, mc_dir):
+    """
+    Prcoess speaker wavs to MCEPs
+    :param spk_path: path to speaker wav dir
+    :param mc_dir: output dir for speaker data
+    :return: None
+    """
+    spk_paths = glob.glob(join(spk_path, '*.wav'))
+
+    # find the sampling rate of teh wav files you are about to convert
+    sample_rate = get_sampling_rate(spk_paths[0])
+
+    spk_name = basename(spk_path)
+
+    get_spk_world_feats(spk_name, spk_paths, mc_dir, sample_rate)
+
+    return None
+
+
+def process_spk_with_split(spk_path, mc_dir_train, mc_dir_test):
     """
     Perform train test split on a speaker and process wavs to MCEPs.
     :param spk_path: path to speaker wav dir
@@ -145,36 +164,77 @@ def process_spk(spk_path, mc_dir_train, mc_dir_test):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
+    perform_data_split_default = 'y'
+
+    # If data_split needs to be peformed
     origin_wavpath_default = "./data/VCTK-Corpus/wav48"
     target_wavpath_default = "./data/VCTK-Corpus/wav16"
+
+    # If data_split does NOT need to be peformed
+    origin_wavpath_train_default = ''
+    origin_wavpath_eval_default = ''
+    target_wavpath_train_default = './data/VCC2018-Corpus/wav22_train'
+    target_wavpath_eval_default = './data/VCC2018-Corpus/wav22_eval'
+
+    # Location of processed mc files
     mc_dir_train_default = './data/mc/train'
     mc_dir_test_default = './data/mc/test'
 
-    # Resampling.
-    parser.add_argument("--resample_rate", type=int, default=0, help="Resampling rate.")
-    parser.add_argument("--origin_wavpath", type=str, default=origin_wavpath_default, help='Original wavpath for resampling.')
-    parser.add_argument("--target_wavpath", type=str, default=target_wavpath_default, help='Target wavpath for resampling.')
+    # DATA SPLITTING.
+    parser.add_argument('--perform_data_split', choices=['y', 'n'], default=perform_data_split_default,
+                        help='Perform random data split.')
 
-    # MCEP Preprocessing.
-    parser.add_argument("--mc_dir_train", type=str, default=mc_dir_train_default, help='Dir for training features.')
-    parser.add_argument("--mc_dir_test", type=str, default=mc_dir_test_default, help='Dir for testing features.')
-    parser.add_argument("--speaker_dirs", type=str, nargs='+', required=True, help='Speakers to be processed.')
-    parser.add_argument("--num_workers", type=int, default=None, help='Number of cpus to use.')
+    # RESAMPLING.
+    parser.add_argument('--resample_rate', type=int, default=0, help='Resampling rate.')
+
+    # if performing a data split:
+    parser.add_argument('--origin_wavpath', type=str, default=origin_wavpath_default,
+                        help='Original wavpath for resampling.')
+    parser.add_argument('--target_wavpath', type=str, default=target_wavpath_default,
+                        help='Target wavpath for resampling.')
+
+    # if NOT performing a data split
+    parser.add_argument('--origin_wavpath_train', type=str, default=origin_wavpath_train_default,
+                        help='Original wavpath for resampling train files.')
+    parser.add_argument('--origin_wavpath_eval', type=str, default=origin_wavpath_eval_default,
+                        help='Original wavpath for resampling eval files.')
+    parser.add_argument('--target_wavpath_train', type=str, default=target_wavpath_train_default,
+                        help='Target wavpath for resampling train files.')
+    parser.add_argument('--target_wavpath_eval', type=str, default=target_wavpath_eval_default,
+                        help='Target wavpath for resampling eval files.')
+
+    # MCEP PREPROCESSING.
+    parser.add_argument('--mc_dir_train', type=str, default=mc_dir_train_default, help='Dir for training features.')
+    parser.add_argument('--mc_dir_test', type=str, default=mc_dir_test_default, help='Dir for testing features.')
+    parser.add_argument('--speaker_dirs', type=str, nargs='+', required=True, help='Speakers to be processed.')
+    parser.add_argument('--num_workers', type=int, default=None, help='Number of cpus to use.')
 
     argv = parser.parse_args()
 
+    perform_data_split = argv.perform_data_split
     resample_rate = argv.resample_rate
     origin_wavpath = argv.origin_wavpath
     target_wavpath = argv.target_wavpath
+    origin_wavpath_train = argv.origin_wavpath_train
+    origin_wavpath_eval = argv.origin_wavpath_eval
+    target_wavpath_train = argv.target_wavpath_train
+    target_wavpath_eval = argv.target_wavpath_eval
     mc_dir_train = argv.mc_dir_train
     mc_dir_test = argv.mc_dir_test
     speaker_dirs = argv.speaker_dirs
     num_workers = argv.num_workers if argv.num_workers is not None else cpu_count()
 
     # Do resample.
-    if resample_rate > 0:
-        print(f'Resampling speakers in {origin_wavpath} to {target_wavpath} at {resample_rate}')
-        resample_to_xk(resample_rate, origin_wavpath, target_wavpath, num_workers)
+    if perform_data_split == 'n':
+        if resample_rate > 0:
+            print(f'Resampling speakers in {origin_wavpath_train} to {target_wavpath_train} at {resample_rate}')
+            resample_to_xk(resample_rate, origin_wavpath_train, target_wavpath_train, num_workers)
+            print(f'Resampling speakers in {origin_wavpath_eval} to {target_wavpath_eval} at {resample_rate}')
+            resample_to_xk(resample_rate, origin_wavpath_eval, target_wavpath_eval, num_workers)
+    else:
+        if resample_rate > 0:
+            print(f'Resampling speakers in {origin_wavpath} to {target_wavpath} at {resample_rate}')
+            resample_to_xk(resample_rate, origin_wavpath, target_wavpath, num_workers)
 
     print('Making directories for MCEPs...')
     os.makedirs(mc_dir_train, exist_ok=True)
@@ -184,13 +244,26 @@ if __name__ == '__main__':
     print(f'Number of workers: {num_workers}')
     executer = ProcessPoolExecutor(max_workers=num_workers)
 
-    # Wavs we are working with
-    working_dir = target_wavpath
-
     futures = []
-    for spk in tqdm(speaker_dirs):
-        spk_dir = os.path.join(working_dir, spk)
-        futures.append(executer.submit(partial(process_spk, spk_dir, mc_dir_train, mc_dir_test)))
+    if perform_data_split == 'n':
+        # current wavs working with (train)
+        working_train_dir = target_wavpath_train
+        for spk in tqdm(speaker_dirs):
+            print(speaker_dirs)
+            spk_dir = os.path.join(working_train_dir, spk)
+            futures.append(executer.submit(partial(process_spk, spk_dir, mc_dir_train)))
+
+        # current wavs working with (eval)
+        working_eval_dir = target_wavpath_eval
+        for spk in tqdm(speaker_dirs):
+            spk_dir = os.path.join(working_eval_dir, spk)
+            futures.append(executer.submit(partial(process_spk, spk_dir, mc_dir_test)))
+    else:
+        # current wavs we are working with (all for data split)
+        working_dir = target_wavpath
+        for spk in tqdm(speaker_dirs):
+            spk_dir = os.path.join(working_dir, spk)
+            futures.append(executer.submit(partial(process_spk_with_split, spk_dir, mc_dir_train, mc_dir_test)))
 
     result_list = [future.result() for future in tqdm(futures)]
     print('Completed:')

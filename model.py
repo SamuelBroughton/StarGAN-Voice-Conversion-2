@@ -5,72 +5,6 @@ import argparse
 from data_loader import get_loader, to_categorical
 
 
-class DownsampleBlock(nn.Module):
-    """Downsampling layers."""
-    def __init__(self, dim_in, dim_out, kernel_size, stride, padding, bias):
-        super(DownsampleBlock, self).__init__()
-
-        self.conv_layer = nn.Sequential(
-            nn.Conv2d(in_channels=dim_in,
-                      out_channels=dim_out,
-                      kernel_size=kernel_size,
-                      stride=stride,
-                      padding=padding,
-                      bias=bias),
-            nn.InstanceNorm2d(num_features=dim_out, affine=True),
-            nn.GLU(dim=1)
-        )
-
-        self.conv_gated = nn.Sequential(
-            nn.Conv2d(in_channels=dim_in,
-                      out_channels=dim_out,
-                      kernel_size=kernel_size,
-                      stride=stride,
-                      padding=padding,
-                      bias=bias),
-            nn.InstanceNorm2d(num_features=dim_out, affine=True),
-            nn.GLU(dim=1)
-        )
-
-    def forward(self, x):
-        # GLU
-        return self.conv_layer(x) * torch.sigmoid(self.conv_gated(x))
-
-
-class UpSampleBlock(nn.Module):
-    """Upsampling layers."""
-    def __init__(self, dim_in, dim_out, kernel_size, stride, padding, bias):
-        super(UpSampleBlock, self).__init__()
-
-        self.conv_layer = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=dim_in,
-                               out_channels=dim_out,
-                               kernel_size=kernel_size,
-                               stride=stride,
-                               padding=padding,
-                               bias=bias),
-            nn.PixelShuffle(2),
-            # CustomPixelShuffle(2)
-            nn.GLU(dim=1)
-        )
-
-        self.conv_gated = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=dim_in,
-                               out_channels=dim_out,
-                               kernel_size=kernel_size,
-                               stride=stride,
-                               padding=padding,
-                               bias=bias),
-            nn.PixelShuffle(2),
-            # CustomPixelShuffle(2)
-            nn.GLU(dim=1)
-        )
-
-    def forward(self, x):
-        # GLU
-        return self.conv_layer(x) * torch.sigmoid(self.conv_gated(x))
-
-
 class ConditionalInstanceNormalisation(nn.Module):
     """CIN Block."""
     def __init__(self, dim_in, style_num):
@@ -103,57 +37,39 @@ class ConditionalInstanceNormalisation(nn.Module):
 
 class ResidualBlock(nn.Module):
     """Residual Block with instance normalization."""
-    def __init__(self, dim_in, dim_out, kernel_size, stride, padding, style_num):
+    def __init__(self, dim_in, dim_out, style_num):
         super(ResidualBlock, self).__init__()
+        self.conv_1 = nn.Conv1d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=False)
+        self.cin_1 = ConditionalInstanceNormalisation(dim_out, style_num)
+        self.relu_1 = nn.GLU(dim=1)
 
-        self.conv_layer = nn.Conv1d(in_channels=dim_in,
-                                    out_channels=dim_out,
-                                    kernel_size=kernel_size,
-                                    stride=stride,
-                                    padding=padding)
+    def forward(self, x, c):
+        x_ = self.conv_1(x)
+        x_ = self.cin_1(x_, c)
+        x_ = self.relu_1(x_)
 
-        self.cin = ConditionalInstanceNormalisation(dim_in=dim_out, style_num=style_num)
-
-        self.glu = nn.GLU(dim=1)
-
-    def forward(self, x, c_):
-        x_ = self.conv_layer(x)
-        x_ = self.cin(x_, c_)
-        x_ = self.glu(x_)
-
-        return x + x_
+        return x_
 
 
 class Generator(nn.Module):
     """Generator network."""
-    def __init__(self, num_speakers=10):
+    def __init__(self, num_speakers=4):
         super(Generator, self).__init__()
-
-        self.num_speakers = num_speakers
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-        # Initial layers.
-        self.conv_layer_1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(5, 15), stride=(1, 1), padding=(2, 7)),
+        # Down-sampling layers
+        self.down_sample_1 = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(3, 9), padding=(1, 4), bias=False),
             nn.GLU(dim=1)
         )
-
-        # Down-sampling layers.
-        self.down_sample_1 = DownsampleBlock(dim_in=64,
-                                             dim_out=256,
-                                             kernel_size=(5, 5),
-                                             stride=(2, 2),
-                                             padding=(2, 2),
-                                             bias=False)
-
-        self.down_sample_2 = DownsampleBlock(dim_in=128,
-                                             dim_out=512,
-                                             kernel_size=(5, 5),
-                                             stride=(2, 2),
-                                             padding=(2, 2),
-                                             bias=False)
-
-        # Reshape data.
+        self.down_sample_2 = nn.Sequential(
+            nn.Conv2d(in_channels=64, out_channels=256, kernel_size=(4, 8), stride=(2, 2), padding=(1, 3), bias=False),
+            nn.InstanceNorm2d(num_features=256, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
+        self.down_sample_3 = nn.Sequential(
+            nn.Conv2d(in_channels=128, out_channels=512, kernel_size=(4, 8), stride=(2, 2), padding=(1, 3), bias=False),
+            nn.InstanceNorm2d(num_features=512, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
 
         # Down-conversion layers.
         self.down_conversion = nn.Sequential(
@@ -167,68 +83,15 @@ class Generator(nn.Module):
         )
 
         # Bottleneck layers.
-        self.residual_1 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_2 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_3 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_4 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_5 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_6 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_7 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_8 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
-
-        self.residual_9 = ResidualBlock(dim_in=256,
-                                        dim_out=512,
-                                        kernel_size=5,
-                                        stride=1,
-                                        padding=2,
-                                        style_num=self.num_speakers)
+        self.residual_1 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_2 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_3 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_4 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_5 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_6 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_7 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_8 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
+        self.residual_9 = ResidualBlock(dim_in=256, dim_out=512, style_num=num_speakers)
 
         # Up-conversion layers.
         self.up_conversion = nn.Conv1d(in_channels=256,
@@ -238,66 +101,54 @@ class Generator(nn.Module):
                                        padding=0,
                                        bias=False)
 
-        # Reshape data.
-
         # Up-sampling layers.
-        self.up_sample_1 = UpSampleBlock(dim_in=256,
-                                         dim_out=1024,
-                                         kernel_size=(5, 5),
-                                         stride=(1, 1),
-                                         padding=2,
-                                         bias=False)
+        self.up_sample_1 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256, out_channels=256, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(num_features=256, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
+        self.up_sample_2 = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=128, out_channels=128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.InstanceNorm2d(num_features=128, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
 
-        self.up_sample_2 = UpSampleBlock(dim_in=128,
-                                         dim_out=512,
-                                         kernel_size=(5, 5),
-                                         stride=(1, 1),
-                                         padding=2,
-                                         bias=False)
+        # Out.
+        self.out = nn.Conv2d(in_channels=64, out_channels=1, kernel_size=7, stride=1, padding=3, bias=False)
 
-        # TODO: final layer differs from paper
-        self.out = nn.Conv2d(in_channels=64,
-                             out_channels=1,
-                             kernel_size=(5, 15),
-                             stride=(1, 1),
-                             padding=(2, 7),
-                             bias=False)
-
-    def forward(self, x, c_):
+    def forward(self, x, c):
         width_size = x.size(3)
-
-        x = self.conv_layer_1(x)
 
         x = self.down_sample_1(x)
         x = self.down_sample_2(x)
+        x = self.down_sample_3(x)
 
         x = x.contiguous().view(-1, 2304, width_size // 4)
         x = self.down_conversion(x)
 
-        x = self.residual_1(x, c_)
-        x = self.residual_2(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
-        x = self.residual_1(x, c_)
+        x = self.residual_1(x, c)
+        x = self.residual_2(x, c)
+        x = self.residual_3(x, c)
+        x = self.residual_4(x, c)
+        x = self.residual_5(x, c)
+        x = self.residual_6(x, c)
+        x = self.residual_7(x, c)
+        x = self.residual_8(x, c)
+        x = self.residual_9(x, c)
 
         x = self.up_conversion(x)
         x = x.view(-1, 256, 9, width_size // 4)
 
         x = self.up_sample_1(x)
         x = self.up_sample_2(x)
+        x = self.out(x)
 
-        out = self.out(x)
-
-        return out
+        return x
 
 
 class Discriminator(nn.Module):
     """Discriminator network."""
-    def __init__(self, input_size=(36, 256), conv_dim=64, repeat_num=5, num_speakers=10):
+    def __init__(self, num_speakers=10):
         super(Discriminator, self).__init__()
 
         self.num_speakers = num_speakers
@@ -308,50 +159,40 @@ class Discriminator(nn.Module):
             nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(3, 3), stride=(1, 1), padding=1),
             nn.GLU(dim=1)
         )
-        self.conv_gated_1 = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=128, kernel_size=(3, 3), stride=(1, 1), padding=1),
-            nn.GLU(dim=1)
-        )
 
         # Down-sampling layers.
-        self.down_sample_1 = DownsampleBlock(dim_in=64,
-                                             dim_out=256,
-                                             kernel_size=(3, 3),
-                                             stride=(2, 2),
-                                             padding=1,
-                                             bias=False)
-
-        self.down_sample_2 = DownsampleBlock(dim_in=128,
-                                             dim_out=512,
-                                             kernel_size=(3, 3),
-                                             stride=(2, 2),
-                                             padding=1,
-                                             bias=False)
-
-        self.down_sample_3 = DownsampleBlock(dim_in=256,
-                                             dim_out=1024,
-                                             kernel_size=(3, 3),
-                                             stride=(2, 2),
-                                             padding=1,
-                                             bias=False)
-
-        self.down_sample_4 = DownsampleBlock(dim_in=512,
-                                             dim_out=1024,
-                                             kernel_size=(1, 5),
-                                             stride=(1, 1),
-                                             padding=(0, 2),
-                                             bias=False)
+        self.down_sample_1 = nn.Sequential(
+            nn.Conv2d(in_channels=64, out_channels=256, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False),
+            nn.InstanceNorm2d(num_features=256, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
+        self.down_sample_2 = nn.Sequential(
+            nn.Conv2d(in_channels=128, out_channels=512, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False),
+            nn.InstanceNorm2d(num_features=512, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
+        self.down_sample_3 = nn.Sequential(
+            nn.Conv2d(in_channels=256, out_channels=1024, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1), bias=False),
+            nn.InstanceNorm2d(num_features=1024, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
+        self.down_sample_4 = nn.Sequential(
+            nn.Conv2d(in_channels=512, out_channels=1024, kernel_size=(1, 5), stride=(1, 1), padding=(0, 2), bias=False),
+            nn.InstanceNorm2d(num_features=1024, affine=True, track_running_stats=True),
+            nn.GLU(dim=1)
+        )
 
         # Fully connected layer.
         self.fully_connected = nn.Linear(in_features=512, out_features=1)
 
         # Projection.
-        self.projection = nn.Linear(self.num_speakers * 2, 512)
+        self.projection = nn.Linear(self.num_speakers, 512)
 
     def forward(self, x, c, c_):
-        c_onehot = torch.cat((c, c_), dim=1).to(self.device)
+        # c_onehot = torch.cat((c, c_), dim=1).to(self.device)
+        c_onehot = c_
 
-        x = self.conv_layer_1(x) * torch.sigmoid(self.conv_gated_1(x))
+        x = self.conv_layer_1(x)
 
         x = self.down_sample_1(x)
         x = self.down_sample_2(x)
@@ -369,7 +210,7 @@ class Discriminator(nn.Module):
         return x
 
 
-# Just for testing shapes of architecture, with existing data.
+# Just for testing shapes of architecture.
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test G and D architecture')
 
@@ -403,12 +244,13 @@ if __name__ == '__main__':
     spk_label_trg = torch.LongTensor(spk_c)
     spk_c_trg = torch.FloatTensor(spk_c_cat)
 
-    mc_real = mc_real.to(device)  # Input mc.
+    mc_real = mc_real.to(device)              # Input mc.
     spk_label_org = spk_label_org.to(device)  # Original spk labels.
-    spk_c_org = spk_c_org.to(device)  # Original spk acc conditioning.
+    spk_c_org = spk_c_org.to(device)          # Original spk acc conditioning.
     spk_label_trg = spk_label_trg.to(device)  # Target spk labels for classification loss for G.
-    spk_c_trg = spk_c_trg.to(device)  # Target spk conditioning.
+    spk_c_trg = spk_c_trg.to(device)          # Target spk conditioning.
 
+    print('------------------------')
     print('Testing Discriminator')
     print('-------------------------')
     print(f'Shape in: {mc_real.shape}')

@@ -1,10 +1,12 @@
 # StarGAN-Voice-Conversion-2
 
-\** **NB: still a working progress with updates coming within 2 weeks. (Dated: 1/05/20)** \**
-
 \** Converted samples coming soon  \**
 
-A pytorch implementation of the paper: StarGAN-VC2: https://arxiv.org/pdf/1907.12279.pdf.
+A pytorch implementation based on: StarGAN-VC2: https://arxiv.org/pdf/1907.12279.pdf.
+
+* Currently does not implement source-and-target adversarial loss.
+* Makes use of gradient penalty.
+* Doesnt make use of PS in G.
 
 # Installation
 
@@ -71,12 +73,13 @@ This example script is for the VCTK data which needs resampling to 16kHz, the sc
 
 ```shell script
 # VCTK-Data
-python preprocess.py --resample_rate 16000 \
+python preprocess.py --perform_data_split y \
+                     --resample_rate 16000 \
                      --origin_wavpath ../data/VCTK-Data/VCTK-Corpus/wav48 \
                      --target_wavpath ../data/VCTK-Data/VCTK-Corpus/wav16 \
                      --mc_dir_train ../data/VCTK-Data/mc/train \
                      --mc_dir_test ../data/VCTK-Data/mc/test \
-                     --speaker_dirs p262 p272 p229 p232 p292 p293 p360 p361 p248 p251
+                     --speaker_dirs p262 p272 p229 p232
 ```
 
 # Training
@@ -118,13 +121,15 @@ For example: restore model at step 120000 and specify the speakers
 ```shell script
 # example with VCTK
 python convert.py --resume_model 120000 \
+                  --sampling_rate 16000 \
                   --num_speakers 4 \
                   --speakers p262 p272 p229 p232 \
                   --train_data_dir ../data/VCTK-Data/mc/train/ \
                   --test_data_dir ../data/VCTK-Data/mc/test/ \
                   --wav_dir ../data/VCTK-Data/VCTK-Corpus/wav16 \
                   --model_save_dir ../data/VCTK-Data/models \
-                  --convert_dir ../data/VCTK-Data/converted
+                  --convert_dir ../data/VCTK-Data/converted \
+                  --num_converted_wavs 4
 ```
 
 This saves your converted flies to `../data/VCTK-Data/converted/120000/`
@@ -142,6 +147,4 @@ python mel_cep_distance.py --convert_dir ../data/VCTK-Data/converted/120000 \
 # TODO:
 - [ ] Include converted samples
 - [ ] Include MCD examples
-- [ ] Update README with checkpoint information
-- [ ] Update README with graphical outputs
-- [ ] Redirect all prints to logs
+- [ ] Include s-t loss like original paper

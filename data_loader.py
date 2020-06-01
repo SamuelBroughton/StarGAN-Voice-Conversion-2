@@ -4,7 +4,7 @@ import glob
 from os.path import join, basename
 import numpy as np
 
-min_length = 128  # Since we slice 512 frames from each utterance when training.
+min_length = 512  # Using 512 randomly cropped frames
 
 
 def to_categorical(y, num_classes=None):
