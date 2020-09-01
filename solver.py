@@ -8,6 +8,7 @@ import datetime
 from data_loader import to_categorical
 from utils import *
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Solver(object):
@@ -42,7 +43,7 @@ class Solver(object):
         self.test_iters = config.test_iters
 
         # Miscellaneous.
-        self.use_tensorboard = config.use_tensorboard
+        self.logger = SummaryWriter(log_dir=config.log_dir)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Directories.
@@ -58,8 +59,6 @@ class Solver(object):
 
         # Build the model and tensorboard.
         self.build_model()
-        if self.use_tensorboard:
-            self.build_tensorboard()
 
     def build_model(self):
         """Create a generator and a discriminator."""
@@ -84,6 +83,10 @@ class Solver(object):
         print(name)
         print("The number of parameters: {}".format(num_params))
 
+    def log_loss_tensorboard(self, loss_dict, step):
+        for k, v in loss_dict.items():
+            self.logger.add_scalar(k, v, step)
+
     def restore_model(self, resume_iters):
         """Restore the trained generator and discriminator."""
         print('Loading the trained models from step {}...'.format(resume_iters))
@@ -92,11 +95,6 @@ class Solver(object):
 
         self.generator.load_state_dict(torch.load(g_path, map_location=lambda storage, loc: storage))
         self.discriminator.load_state_dict(torch.load(d_path, map_location=lambda storage, loc: storage))
-
-    def build_tensorboard(self):
-        """Build a tensorboard logger."""
-        from logger import Logger
-        self.logger = Logger(self.log_dir)
 
     def update_lr(self, g_lr, d_lr):
         """Decay learning rates of the generator and discriminator."""
@@ -169,7 +167,7 @@ class Solver(object):
 
         # Start training from scratch or resume training.
         start_iters = 0
-        if self.resume_iters:
+        if self.resume_iters is not None:
             print("resuming step %d ..."% self.resume_iters)
             start_iters = self.resume_iters
             self.restore_model(self.resume_iters)
@@ -189,7 +187,7 @@ class Solver(object):
                 data_iter = iter(train_loader)
                 mc_real, spk_label_org, spk_c_org = next(data_iter)
 
-            mc_real.unsqueeze_(1) # (B, D, T) -> (B, 1, D, T) for conv2d
+            mc_real.unsqueeze_(1)  # (B, D, T) -> (B, 1, D, T) for conv2d
 
             # Generate target domain labels randomly.
             # spk_label_trg: int,   spk_c_trg:one-hot representation
@@ -207,28 +205,23 @@ class Solver(object):
 
             # Compute loss with real mc feats.
             d_out_src = self.discriminator(mc_real, spk_c_trg, spk_c_org)
-            d_loss_real = - torch.mean(d_out_src)
+            d_loss_real = torch.mean((1.0 - d_out_src) ** 2)
 
-            # Compute loss with face mc feats.
+            # Compute loss with fake mc feats.
             mc_fake = self.generator(mc_real, spk_c_trg)
             d_out_fake = self.discriminator(mc_fake.detach(), spk_c_org, spk_c_trg)
-            d_loss_fake = torch.mean(d_out_fake)
-
-            # Compute loss for gradient penalty.
-            alpha = torch.rand(mc_real.size(0), 1, 1, 1).to(self.device)
-            x_hat = (alpha * mc_real.data + (1 - alpha) * mc_fake.data).requires_grad_(True)
-            d_out_src = self.discriminator(x_hat, spk_c_org, spk_c_trg)
-            d_loss_gp = self.gradient_penalty(d_out_src, x_hat)
+            d_loss_fake = torch.mean(d_out_fake ** 2)
 
             # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.lambda_gp * d_loss_gp
+            d_loss = d_loss_real + d_loss_fake  # + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
             self.d_optimizer.step()
 
             # Logging.
             loss = {}
-            loss['D/loss_gp'] = d_loss_gp.item()
+            loss['D/loss_real'] = d_loss_real.item()
+            loss['D/loss_fake'] = d_loss_fake.item()
             loss['D/loss'] = d_loss.item()
 
             # =================================================================================== #
@@ -239,7 +232,7 @@ class Solver(object):
                 # Original-to-target domain.
                 mc_fake = self.generator(mc_real, spk_c_trg)
                 g_out_src = self.discriminator(mc_fake, spk_c_org, spk_c_trg)
-                g_loss_fake = - torch.mean(g_out_src)
+                g_loss_fake = torch.mean((1.0 - g_out_src) ** 2)
 
                 # Target-to-original domain. Cycle-consistent.
                 mc_reconst = self.generator(mc_fake, spk_c_org)
@@ -250,6 +243,9 @@ class Solver(object):
                 g_loss_id = torch.mean(torch.abs(mc_real - mc_fake_id))
 
                 # Backward and optimize.
+                if i > 10000:
+                    self.lambda_id = 0
+
                 g_loss = g_loss_fake \
                     + self.lambda_rec * g_loss_rec \
                     + self.lambda_id * g_loss_id
@@ -261,6 +257,7 @@ class Solver(object):
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
+                loss['G/loss_id'] = g_loss_id.item()
                 loss['G/loss'] = g_loss.item()
 
             # =================================================================================== #
@@ -275,10 +272,7 @@ class Solver(object):
                 for tag, value in loss.items():
                     log += ", {}: {:.4f}".format(tag, value)
                 print(log)
-
-                if self.use_tensorboard:
-                    for tag, value in loss.items():
-                        self.logger.scalar_summary(tag, value, i+1)
+                self.log_loss_tensorboard(loss, i+1)
 
             if (i+1) % self.sample_step == 0:
                 sampling_rate = 16000
@@ -297,8 +291,9 @@ class Solver(object):
                         coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
                         coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
                         conds = torch.FloatTensor(self.test_loader.spk_c_trg).to(self.device)
+                        org_conds = torch.FloatTensor(self.test_loader.spk_c_org).to(self.device)
                         # print(conds.size())
-                        coded_sp_converted_norm = self.generator(coded_sp_norm_tensor, conds).data.cpu().numpy()
+                        coded_sp_converted_norm = self.generator(coded_sp_norm_tensor, org_conds, conds).data.cpu().numpy()
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)

@@ -22,9 +22,11 @@ class ConvertDataset(object):
         self.trg_spk = trg_spk
 
         # Source speaker locations.
-        self.src_mc_files = sorted(glob.glob(join(config.test_data_dir, f'{self.src_spk}*.npy')))
         self.src_spk_stats = np.load(join(config.train_data_dir, f'{self.src_spk}_stats.npz'))
         self.src_wav_dir = f'{config.wav_dir}/{self.src_spk}'
+        self.trg_wav_dir = f'{config.wav_dir}/{self.trg_spk}'
+        self.src_wav_files = sorted(glob.glob(join(self.src_wav_dir, '*.wav')))
+        self.trg_wav_files = sorted(glob.glob(join(self.trg_wav_dir, '*.wav')))
 
         # Target speaker locations.
         self.trg_spk_stats = np.load(join(config.train_data_dir, f'{self.trg_spk}_stats.npz'))
@@ -38,18 +40,33 @@ class ConvertDataset(object):
         self.mcep_mean_trg = self.trg_spk_stats['coded_sps_mean']
         self.mcep_std_trg = self.trg_spk_stats['coded_sps_std']
 
-        self.spk_idx = spk2idx[self.trg_spk]
-        spk_cat = to_categorical([self.spk_idx], num_classes=len(speakers))
-        self.spk_c_trg = spk_cat
+        self.spk_idx_src, self.spk_idx_trg = spk2idx[src_spk], spk2idx[trg_spk]
+        spk_cat_src = to_categorical([self.spk_idx_src], num_classes=len(speakers))
+        spk_cat_trg = to_categorical([self.spk_idx_trg], num_classes=len(speakers))
+        self.spk_c_org = spk_cat_src
+        self.spk_c_trg = spk_cat_trg
 
     def get_batch_test_data(self, batch_size=4):
         batch_data = []
-        for i in range(batch_size):
-            mcfile = self.src_mc_files[i]
-            filename = basename(mcfile).split('-')[-1]
-            wavfile_path = join(self.src_wav_dir, filename.replace('npy', 'wav'))
+        i = 0
 
-            batch_data.append(wavfile_path)
+        while i != batch_size:
+            wav_file = self.src_wav_files[i]
+            filename = basename(wav_file)
+            num = filename.split('.')[0].split('_')[1]
+
+            for j in range(len(self.trg_wav_files)):
+                trg_wav_file = self.trg_wav_files[j]
+                trg_filename = basename(trg_wav_file)
+                trg_num = trg_filename.split('.')[0].split('_')[1]
+
+                if num == trg_num:
+                    batch_data.append(wav_file)
+                    break
+                elif j == len(self.trg_wav_files) - 1:
+                    batch_size += 1
+
+            i += 1
 
         return batch_data
 
@@ -107,9 +124,10 @@ def convert(config):
                         coded_sp_norm = (coded_sp - data_loader.mcep_mean_src) / data_loader.mcep_std_src
                         coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(device)
                         spk_conds = torch.FloatTensor(data_loader.spk_c_trg).to(device)
+                        org_conds = torch.FloatTensor(data_loader.spk_c_org).to(device)
 
                         # generate converted speech
-                        coded_sp_converted_norm = generator(coded_sp_norm_tensor, spk_conds).data.cpu().numpy()
+                        coded_sp_converted_norm = generator(coded_sp_norm_tensor, org_conds, spk_conds).data.cpu().numpy()
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * data_loader.mcep_std_trg + data_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         print("After being fed into G: ", coded_sp_converted.shape)
@@ -136,7 +154,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # Model configuration.
-    parser.add_argument('--num_speakers', type=int, default=10, help='Dimension of speaker labels.')
     parser.add_argument('--num_converted_wavs', type=int, default=8, help='Number of wavs to convert.')
     parser.add_argument('--resume_model', type=str, default=None, help='Model to resume for testing.')
     parser.add_argument('--speakers', type=str, nargs='+', required=True, help='Speakers to be converted.')
@@ -148,9 +165,13 @@ if __name__ == '__main__':
     parser.add_argument('--model_save_dir', type=str, default='./models', help='Path to model save directory.')
     parser.add_argument('--convert_dir', type=str, default='./converted', help='Patht to converted wavs directory.')
 
-    parser.add_argument('--sampling_rate', type=int, default=16000, help='Sampling rate for converted wavs.')
+    parser.add_argument('--sampling_rate', type=int, default=22050, help='Sampling rate for converted wavs.')
 
     config = parser.parse_args()
+
+    # no. of spks
+    config.num_speakers = len(config.speakers)
+
     print(config)
 
     if config.resume_model is None:

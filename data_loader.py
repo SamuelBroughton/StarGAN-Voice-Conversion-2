@@ -4,7 +4,7 @@ import glob
 from os.path import join, basename
 import numpy as np
 
-min_length = 512  # Using 512 randomly cropped frames
+min_length = 256  # Since we slice 256 frames from each utterance when training.
 
 
 def to_categorical(y, num_classes=None):
@@ -107,9 +107,11 @@ class TestDataset(object):
         self.mcep_mean_trg = self.trg_spk_stats['coded_sps_mean']
         self.mcep_std_trg = self.trg_spk_stats['coded_sps_std']
         self.src_wav_dir = f'{wav_dir}/{src_spk}'
-        self.spk_idx = self.spk2idx[trg_spk]
-        spk_cat = to_categorical([self.spk_idx], num_classes=len(self.speakers))
-        self.spk_c_trg = spk_cat
+        self.spk_idx_src, self.spk_idx_trg = self.spk2idx[src_spk], self.spk2idx[trg_spk]
+        spk_cat_src = to_categorical([self.spk_idx_src], num_classes=len(self.speakers))
+        spk_cat_trg = to_categorical([self.spk_idx_trg], num_classes=len(self.speakers))
+        self.spk_c_org = spk_cat_src
+        self.spk_c_trg = spk_cat_trg
 
     def get_batch_test_data(self, batch_size=8):
         batch_data = []

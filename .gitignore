@@ -3,4 +3,7 @@ __pycache__/
 
 *.ipynb
 
-test_stargan_vc2_model.py
+# dirs
+samples/
+logs/
+models/

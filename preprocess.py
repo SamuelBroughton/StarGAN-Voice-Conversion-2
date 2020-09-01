@@ -206,7 +206,7 @@ if __name__ == '__main__':
     # MCEP PREPROCESSING.
     parser.add_argument('--mc_dir_train', type=str, default=mc_dir_train_default, help='Dir for training features.')
     parser.add_argument('--mc_dir_test', type=str, default=mc_dir_test_default, help='Dir for testing features.')
-    parser.add_argument('--speaker_dirs', type=str, nargs='+', required=True, help='Speakers to be processed.')
+    parser.add_argument('--speakers', type=str, nargs='+', required=True, help='Speakers to be processed.')
     parser.add_argument('--num_workers', type=int, default=None, help='Number of cpus to use.')
 
     argv = parser.parse_args()
@@ -221,7 +221,7 @@ if __name__ == '__main__':
     target_wavpath_eval = argv.target_wavpath_eval
     mc_dir_train = argv.mc_dir_train
     mc_dir_test = argv.mc_dir_test
-    speaker_dirs = argv.speaker_dirs
+    speakers = argv.speakers
     num_workers = argv.num_workers if argv.num_workers is not None else cpu_count()
 
     # Do resample.
@@ -240,7 +240,7 @@ if __name__ == '__main__':
     os.makedirs(mc_dir_train, exist_ok=True)
     os.makedirs(mc_dir_test, exist_ok=True)
 
-    num_workers = len(speaker_dirs)
+    num_workers = len(speakers)
     print(f'Number of workers: {num_workers}')
     executer = ProcessPoolExecutor(max_workers=num_workers)
 
@@ -248,20 +248,20 @@ if __name__ == '__main__':
     if perform_data_split == 'n':
         # current wavs working with (train)
         working_train_dir = target_wavpath_train
-        for spk in tqdm(speaker_dirs):
-            print(speaker_dirs)
+        for spk in tqdm(speakers):
+            print(speakers)
             spk_dir = os.path.join(working_train_dir, spk)
             futures.append(executer.submit(partial(process_spk, spk_dir, mc_dir_train)))
 
         # current wavs working with (eval)
         working_eval_dir = target_wavpath_eval
-        for spk in tqdm(speaker_dirs):
+        for spk in tqdm(speakers):
             spk_dir = os.path.join(working_eval_dir, spk)
             futures.append(executer.submit(partial(process_spk, spk_dir, mc_dir_test)))
     else:
         # current wavs we are working with (all for data split)
         working_dir = target_wavpath
-        for spk in tqdm(speaker_dirs):
+        for spk in tqdm(speakers):
             spk_dir = os.path.join(working_dir, spk)
             futures.append(executer.submit(partial(process_spk_with_split, spk_dir, mc_dir_train, mc_dir_test)))
 

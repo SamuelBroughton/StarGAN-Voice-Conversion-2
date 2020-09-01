@@ -6,27 +6,25 @@ from data_loader import get_loader, to_categorical
 
 
 class ConditionalInstanceNormalisation(nn.Module):
-    """CIN Block."""
-    def __init__(self, dim_in, style_num):
+    """AdaIN Block."""
+
+    def __init__(self, dim_in, dim_c):
         super(ConditionalInstanceNormalisation, self).__init__()
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.dim_in = dim_in
-        self.style_num = style_num
-        self.gamma = nn.Linear(style_num, dim_in)
-        self.beta = nn.Linear(style_num, dim_in)
+        self.gamma_t = nn.Linear(dim_c, dim_in)
+        self.beta_t = nn.Linear(dim_c, dim_in)
 
-    def forward(self, x, c):
+    def forward(self, x, c_trg):
         u = torch.mean(x, dim=2, keepdim=True)
         var = torch.mean((x - u) * (x - u), dim=2, keepdim=True)
         std = torch.sqrt(var + 1e-8)
 
-        # width = x.shape[2]
-
-        gamma = self.gamma(c.to(self.device))
+        gamma = self.gamma_t(c_trg.to(self.device))
         gamma = gamma.view(-1, self.dim_in, 1)
-        beta = self.beta(c.to(self.device))
+        beta = self.beta_t(c_trg.to(self.device))
         beta = beta.view(-1, self.dim_in, 1)
 
         h = (x - u) / std
@@ -39,16 +37,16 @@ class ResidualBlock(nn.Module):
     """Residual Block with instance normalization."""
     def __init__(self, dim_in, dim_out, style_num):
         super(ResidualBlock, self).__init__()
-        self.conv_1 = nn.Conv1d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=False)
-        self.cin_1 = ConditionalInstanceNormalisation(dim_out, style_num)
-        self.relu_1 = nn.GLU(dim=1)
+        self.conv = nn.Conv1d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=False)
+        self.cin = ConditionalInstanceNormalisation(dim_out, style_num)
+        self.glu = nn.GLU(dim=1)
 
     def forward(self, x, c):
-        x_ = self.conv_1(x)
-        x_ = self.cin_1(x_, c)
-        x_ = self.relu_1(x_)
+        x = self.conv(x)
+        x = self.cin(x, c)
+        x = self.glu(x)
 
-        return x_
+        return x
 
 
 class Generator(nn.Module):
@@ -186,11 +184,10 @@ class Discriminator(nn.Module):
         self.fully_connected = nn.Linear(in_features=512, out_features=1)
 
         # Projection.
-        self.projection = nn.Linear(self.num_speakers, 512)
+        self.projection = nn.Linear(2*self.num_speakers, 512)
 
     def forward(self, x, c, c_):
-        # c_onehot = torch.cat((c, c_), dim=1).to(self.device)
-        c_onehot = c_
+        c_onehot = torch.cat((c, c_), dim=1).to(self.device)
 
         x = self.conv_layer_1(x)
 
@@ -200,31 +197,22 @@ class Discriminator(nn.Module):
         x_ = self.down_sample_4(x)
 
         h = torch.sum(x_, dim=(2, 3))
+        x = self.fully_connected(x_.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)  # (b, 1, h, w)
+        p = self.projection(c_onehot)  # (b, 512)
 
-        x = self.fully_connected(h)
+        in_prod = p * h
 
-        p = self.projection(c_onehot)
-
-        x += torch.sum(p * h, dim=1, keepdim=True)
+        x = x.view(x.size(0), -1)
+        x = torch.mean(x, dim=-1) + torch.mean(in_prod, dim=-1)
 
         return x
 
 
 # Just for testing shapes of architecture.
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Test G and D architecture')
-
-    train_dir_default = '../data/VCTK-Data/mc/train'
-    speaker_default = 'p229'
-
-    # Data config.
-    parser.add_argument('--train_dir', type=str, default=train_dir_default, help='Train dir path')
-    parser.add_argument('--speakers', type=str, nargs='+', required=True, help='Speaker dir names')
+    train_dir = '../data/VCC2018-Data/mc/train'
     num_speakers = 4
-
-    argv = parser.parse_args()
-    train_dir = argv.train_dir
-    speakers_using = argv.speakers
+    speakers_using = ['VCC2SM1', 'VCC2SM2', 'VCC2SF1', 'VCC2SF2']
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -236,18 +224,15 @@ if __name__ == '__main__':
     train_loader = get_loader(speakers_using, train_dir, 8, 'train', num_workers=1)
     data_iter = iter(train_loader)
 
-    mc_real, spk_label_org, spk_c_org = next(data_iter)
+    mc_real, _, spk_c_org = next(data_iter)
     mc_real.unsqueeze_(1)  # (B, D, T) -> (B, 1, D, T) for conv2d
 
     spk_c = np.random.randint(0, num_speakers, size=mc_real.size(0))
     spk_c_cat = to_categorical(spk_c, num_speakers)
-    spk_label_trg = torch.LongTensor(spk_c)
     spk_c_trg = torch.FloatTensor(spk_c_cat)
 
     mc_real = mc_real.to(device)              # Input mc.
-    spk_label_org = spk_label_org.to(device)  # Original spk labels.
     spk_c_org = spk_c_org.to(device)          # Original spk acc conditioning.
-    spk_label_trg = spk_label_trg.to(device)  # Target spk labels for classification loss for G.
     spk_c_trg = spk_c_trg.to(device)          # Target spk conditioning.
 
     print('------------------------')

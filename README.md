@@ -1,11 +1,8 @@
 # StarGAN-Voice-Conversion-2
 
-\** Converted samples coming soon  \**
-
 A pytorch implementation based on: StarGAN-VC2: https://arxiv.org/pdf/1907.12279.pdf.
 
-* Currently does not implement source-and-target adversarial loss.
-* Makes use of gradient penalty.
+* Uses source and target domain codes in D but not G as I found better quality output 
 * Doesnt make use of PS in G.
 
 # Installation
@@ -47,9 +44,12 @@ pip install mcd=0.4
 
 # Usage
 
-## Download Dataset
+## Download Datasets
 
 * [VCTK](https://homepages.inf.ed.ac.uk/jyamagis/page3/page58/page58.html)
+* [VCC2018](https://datashare.is.ed.ac.uk/handle/10283/3061?show=full)
+
+Example with VCTK:
 
 ```shell script
 mkdir ../data/VCTK-Data
@@ -63,43 +63,47 @@ If the downloaded VCTK is in tar.gz, run this:
 tar -xzvf VCTK-Corpus.tar.gz -C ../data/VCTK-Data
 ```
 
-* VCC2016 and 2018 are yet to be included
-
 ## Preprocessing data
 
 We will use Mel-Cepstral coefficients(MCEPs) here.
 
-This example script is for the VCTK data which needs resampling to 16kHz, the script allows you to preprocess the data without resampling either. This script assumes the data dir to be `../data/VCTK-Data/`
+Example script for VCTK data which we can resample to 22.05kHz. The VCTK dataset is not split into train and test wavs, so we perform a data split.
 
 ```shell script
 # VCTK-Data
 python preprocess.py --perform_data_split y \
-                     --resample_rate 16000 \
+                     --resample_rate 22050 \
                      --origin_wavpath ../data/VCTK-Data/VCTK-Corpus/wav48 \
-                     --target_wavpath ../data/VCTK-Data/VCTK-Corpus/wav16 \
+                     --target_wavpath ../data/VCTK-Data/VCTK-Corpus/wav22 \
                      --mc_dir_train ../data/VCTK-Data/mc/train \
                      --mc_dir_test ../data/VCTK-Data/mc/test \
-                     --speaker_dirs p262 p272 p229 p232
+                     --speakers p229 p232 p236 p243
+```
+
+Example Script for VCC2018 data which is already seperated into train and test wav folders and is already at 22.05kHz.
+
+```shell script
+# VCC2018-Data
+python preprocess.py --perform_data_splt n \
+                     --target_wav_path_train ../data/VCC2018-Data/VCC2018-Corpus/wav22_train \
+                     --target_wav_path_eval ../data/VCC2018-Data/VCC2018-Corpus/wav22_eval \
+                     --mc_dir_train ../data/VCC2018-Data/mc/train \
+                     --mc_dir_test ../data/VCC2018-Data/mc/test \
+                     --speakers VCC2SF1 VCC2SF2 VCC2SM1 VCC2SM2
 ```
 
 # Training
 
-* Currently only tested with conversion between 4 speakers
-* Not yet tested with use of tensorboard
-
 Example script:
+
 ```shell script
 # example with VCTK
 python main.py --train_data_dir ../data/VCTK-Data/mc/train \
                --test_data_dir ../data/VCTK-Data/mc/test \
-               --use_tensorboard False \
-               --wav_dir ../data/VCTK-Data/VCTK-Corpus/wav16 \
-               --model_save_dir ../data/VCTK-Data/models \
-               --sample_dir ../data/VCTK-Data/samples \
-               --num_iters 200000 \
-               --batch_size 8 \
-               --speakers p262 p272 p229 p232 \
-               --num_speakers 4
+               --wav_dir ../data/VCTK-Data/VCTK-Corpus/wav22 \
+               --model_save_dir ./models/experiment_name \
+               --sample_dir ./samples/experiment_name \
+               --speakers p229 p232 p236 p243
 ```
 
 If you encounter an error such as:
@@ -116,35 +120,19 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/<PATH>/<TO>/<YOUR>/.conda/envs/<ENV>/li
 
 ## Conversion
 
-For example: restore model at step 120000 and specify the speakers
+For example: restore model at step 90000 and specify the speakers
 
 ```shell script
 # example with VCTK
-python convert.py --resume_model 120000 \
-                  --sampling_rate 16000 \
-                  --num_speakers 4 \
-                  --speakers p262 p272 p229 p232 \
+python convert.py --resume_model 90000 \
+                  --speakers p229 p232 p236 p243 \
                   --train_data_dir ../data/VCTK-Data/mc/train/ \
                   --test_data_dir ../data/VCTK-Data/mc/test/ \
-                  --wav_dir ../data/VCTK-Data/VCTK-Corpus/wav16 \
-                  --model_save_dir ../data/VCTK-Data/models \
-                  --convert_dir ../data/VCTK-Data/converted \
-                  --num_converted_wavs 4
-```
-
-This saves your converted flies to `../data/VCTK-Data/converted/120000/`
-
-## Calculate Mel Cepstral Distortion
-
-Calculate the Mel Cepstral Distortion of the reference speaker vs the synthesized speaker. Use `--spk_to_spk` tag to define multiple speaker to speaker folders generated with the convert script.
-
-```shell script
-python mel_cep_distance.py --convert_dir ../data/VCTK-Data/converted/120000 \
-                           --spk_to_spk p262_to_p272 \
-                           --output_csv p262_to_p272.csv
+                  --wav_dir ../data/VCTK-Data/VCTK-Corpus/wav22 \
+                  --model_save_dir ./models/experiment_name \
+                  --convert_dir ./converted/experiment_name
 ```
 
 # TODO:
-- [ ] Include converted samples
-- [ ] Include MCD examples
-- [ ] Include s-t loss like original paper
+- [x] Include converted samples
+- [x] Include s-t loss like original paper (NB: not exactly the same, see top of this README)
