@@ -124,10 +124,12 @@ def convert(config):
                         coded_sp_norm = (coded_sp - data_loader.mcep_mean_src) / data_loader.mcep_std_src
                         coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(device)
                         spk_conds = torch.FloatTensor(data_loader.spk_c_trg).to(device)
+
+                        # Include org_conds if using src and target domain codes.
                         org_conds = torch.FloatTensor(data_loader.spk_c_org).to(device)
 
                         # generate converted speech
-                        coded_sp_converted_norm = generator(coded_sp_norm_tensor, org_conds, spk_conds).data.cpu().numpy()
+                        coded_sp_converted_norm = generator(coded_sp_norm_tensor, spk_conds).data.cpu().numpy()
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * data_loader.mcep_std_trg + data_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         print("After being fed into G: ", coded_sp_converted.shape)

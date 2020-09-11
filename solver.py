@@ -291,9 +291,11 @@ class Solver(object):
                         coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
                         coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
                         conds = torch.FloatTensor(self.test_loader.spk_c_trg).to(self.device)
-                        org_conds = torch.FloatTensor(self.test_loader.spk_c_org).to(self.device)
-                        # print(conds.size())
-                        coded_sp_converted_norm = self.generator(coded_sp_norm_tensor, org_conds, conds).data.cpu().numpy()
+
+                        # Include org_conds if using src and target domain codes.
+                        # org_conds = torch.FloatTensor(self.test_loader.spk_c_org).to(self.device)
+
+                        coded_sp_converted_norm = self.generator(coded_sp_norm_tensor, conds).data.cpu().numpy()
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)
